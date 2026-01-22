@@ -1,13 +1,16 @@
 # GitHub Gaant
 
+[![PyPI](https://img.shields.io/pypi/v/github-gaant)](https://pypi.org/project/github-gaant/)
+
 Gestiona tus issues de GitHub como tareas de un diagrama de Gantt. Sincroniza issues con un archivo YAML editable y genera visualizaciones Mermaid.
 
 ## Características
 
 - **Pull**: Descarga issues de un GitHub Project V2 y genera automáticamente:
   - Archivo YAML editable
-  - Archivo Excel editable  
+  - Archivo Excel editable
   - Diagrama Gantt en Mermaid
+  - Archivos Markdown para contenido (`issues/*.md`)
 - **Push**: Sube cambios locales a GitHub (desde YAML o Excel)
 - **View**: Genera diagramas Mermaid Gantt para visualización
 - **Formatos**: Soporta YAML (.yaml) y Excel (.xlsx) como archivo de trabajo
@@ -180,10 +183,11 @@ gaant pull
 | `--config`, `-c` | Ruta a config.yaml |
 | `--output`, `-o` | Nombre base para archivos (override) |
 
-**Archivos generados**: El comando `pull` siempre genera tres archivos:
-- `gaant.yaml` - Datos en formato YAML (ideal para control de versiones)
-- `gaant.xlsx` - Datos en formato Excel (ideal para edición visual)
-- `gaant_gantt.md` - Diagrama Gantt en Mermaid (para visualización)
+**Archivos generados**: El comando `pull` sincroniza el estado completo:
+- `gaant.yaml` - Estructura y metadatos (versión de control)
+- `gaant.xlsx` - Interfaz de edición tipo hoja de cálculo
+- `gaant_gantt.md` - Visualización rápida
+- `issues/*.md` - Directorio con el cuerpo (descripción) de cada issue para edición cómoda
 
 **Comportamiento**: Siempre sobrescribe los archivos locales (GitHub es fuente de verdad en pull).
 
@@ -213,9 +217,15 @@ gaant push
 | `--source`, `-s` | Archivo fuente (.yaml o .xlsx) |
 | `--dry-run`, `-n` | Solo mostrar cambios, sin aplicar |
 
+| `--config`, `-c` | Ruta a config.yaml |
+| `--source`, `-s` | Archivo fuente (.yaml o .xlsx) |
+| `--dry-run`, `-n` | Solo mostrar cambios, sin aplicar |
+| `--enforce-subissues` | Forzar creación de enlaces parent/child en GitHub |
+
 **Operaciones soportadas**:
 - Crear nuevos issues (cuando `issue: 0`)
-- Actualizar título, body, labels, assignees
+- Actualizar título, labels, assignees
+- Actualizar contenido (body) leyendo desde `issues/*.md`
 - Actualizar fechas en campos del Project
 - Agregar issues al Project automáticamente
 
