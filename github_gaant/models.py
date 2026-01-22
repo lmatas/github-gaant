@@ -153,10 +153,22 @@ class Config(BaseModel):
     @property
     def owner(self) -> str:
         """Extract owner from repo string."""
-        return self.repo.split("/")[0].strip()
+        parts = self.repo.split("/")
+        # Handle cases like "orgs/my-org" (2 parts) or "orgs/my-org/projects/1"
+        if len(parts) >= 2 and parts[0] in ("orgs", "users"):
+            return parts[1].strip()
+        return parts[0].strip()
     
     @computed_field
     @property
     def repo_name(self) -> str:
         """Extract repo name from repo string."""
-        return self.repo.split("/")[1].strip()
+        parts = self.repo.split("/")
+        if len(parts) >= 2 and parts[0] in ("orgs", "users"):
+             # If it's an org/user URL, we might not have a repo name effectively
+             # returns the last part if it exists
+             return parts[-1].strip()
+        
+        if len(parts) > 1:
+            return parts[1].strip()
+        return ""

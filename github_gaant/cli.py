@@ -136,11 +136,16 @@ def push(
         "--dry-run", "-n",
         help="Show what would be done without making changes"
     ),
+    enforce_subissues: bool = typer.Option(
+        False,
+        "--enforce-subissues",
+        help="Ensure all subtasks are linked as sub-issues to their parents in GitHub"
+    ),
 ):
     """Push local changes to GitHub."""
     try:
         config = load_config(config_path)
-        changes = push_to_github(config, source, dry_run)
+        changes = push_to_github(config, source, dry_run, enforce_subissues)
         
         if changes:
             new_count = sum(1 for c in changes if c.change_type == ChangeType.NEW)

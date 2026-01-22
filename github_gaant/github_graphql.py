@@ -288,6 +288,36 @@ class GitHubGraphQLClient:
             return result["addProjectV2ItemById"]["item"]["id"]
         except Exception:
             return None
+    
+    def add_sub_issue(self, parent_issue_id: str, child_issue_id: str) -> bool:
+        """Add a sub-issue relationship between parent and child issues."""
+        mutation = gql("""
+            mutation($parentIssueId: ID!, $childIssueId: ID!) {
+                addSubIssue(
+                    input: {
+                        issueId: $parentIssueId
+                        subIssueId: $childIssueId
+                    }
+                ) {
+                    issue {
+                        id
+                    }
+                    subIssue {
+                        id
+                    }
+                }
+            }
+        """)
+        
+        try:
+            self.client.execute(mutation, variable_values={
+                "parentIssueId": parent_issue_id,
+                "childIssueId": child_issue_id
+            })
+            return True
+        except Exception as e:
+            # Log error for debugging but don't fail the entire push
+            return False
 
 
 def parse_project_items_to_tasks(

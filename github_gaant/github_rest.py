@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import List, Optional
 
 from github import Auth, Github
+from github.GithubObject import NotSet
 from github.Issue import Issue
 from github.Repository import Repository
 
@@ -50,7 +51,7 @@ class GitHubRESTClient:
             body=body or "",
             labels=labels or [],
             assignees=assignees or [],
-            milestone=milestone,
+            milestone=milestone or NotSet,
         )
     
     def update_issue(
