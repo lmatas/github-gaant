@@ -43,6 +43,8 @@ Parse the planning markdown document and generate `gaant.yaml`:
 - **Sub-activities:** `### **X.N.M:`
 - **Dates:** `*Corresponds to: [Month(s) X-Y]*` or `(Months X-Y)` in title
 
+**CRITICAL:** Ensure `start` and `end` dates are extracted and populated in `YYYY-MM-DD` format based on the "Corresponds to" lines. Do not leave them empty.
+
 ### Output YAML Format (with issue: 0 for new issues)
 
 ```yaml
@@ -69,9 +71,21 @@ tasks:
 
 ---
 
+## Step 2.5: User Validation
+
+**STOP and ask the user to verify the generated `gaant.yaml` file.**
+
+Request that they check:
+1. **Dates:** Are `start` and `end` fields populated for all tasks?
+2. **Timeline:** Do the dates match the "Corresponds to" sections in the source document?
+3. **Structure:** Is the parent/child relationship correct?
+
+**Do not proceed to Step 3 until the user confirms the file is correct.**
+
+---
+
 ## Step 3: First Push - Create Issues
 
-// turbo
 Run `gaant push` to create all issues in GitHub:
 
 ```bash
@@ -142,7 +156,6 @@ mkdir -p issues
 
 ## Step 6: Second Push - Upload Bodies
 
-// turbo
 Run `gaant push` again to upload the markdown bodies:
 
 ```bash
