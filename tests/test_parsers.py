@@ -6,13 +6,13 @@ import tempfile
 
 import pytest
 
-from src.models import IssueState, Project, Task
-from src.parsers.yaml_parser import (
+from github_gaant.models import IssueState, Project, Task
+from github_gaant.parsers.yaml_parser import (
     load_project_from_yaml,
     project_to_yaml,
     save_project_to_yaml,
 )
-from src.parsers.mermaid_gen import (
+from github_gaant.parsers.mermaid_gen import (
     generate_mermaid_gantt,
     generate_table_view,
     sanitize_title,

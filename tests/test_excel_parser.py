@@ -6,8 +6,8 @@ import tempfile
 
 import pytest
 
-from src.models import IssueState, Project, Task
-from src.parsers.excel_parser import (
+from github_gaant.models import IssueState, Project, Task
+from github_gaant.parsers.excel_parser import (
     load_project_from_excel,
     save_project_to_excel,
     flatten_tasks_for_excel,

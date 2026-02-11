@@ -31,6 +31,12 @@ def task_to_dict(task: Task) -> Dict[str, Any]:
     if task.state == IssueState.CLOSED:
         data["closed"] = True
     
+    # Store project and issue IDs for syncing
+    if task.project_item_id:
+        data["project_item_id"] = task.project_item_id
+    if task.issue_id:
+        data["issue_id"] = task.issue_id
+    
     # Include computed fields for reference
     data["progress"] = task.progress
     

@@ -1,5 +1,6 @@
 """CLI for GitHub Gaant."""
 
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -16,7 +17,7 @@ from .parsers.mermaid_gen import (
     generate_table_view,
     save_mermaid_to_file,
 )
-from .sync import ChangeType, get_status, pull_from_github, push_to_github, file_exists, load_project
+from .sync import ChangeType, get_status, pull_from_github, push_to_github, file_exists, load_project, fetch_issue_thread, fetch_user_issues
 
 app = typer.Typer(
     name="gaant",
@@ -318,6 +319,197 @@ def validate(
             console.print(f"  [yellow]![/yellow] End date field not found: {config.date_fields.end}")
         
         console.print("\n[green]✓ Validation complete[/green]")
+    except Exception as e:
+        console.print(f"[red]Error: {e}[/red]")
+        raise typer.Exit(1)
+
+
+@app.command("fetch-thread")
+def fetch_thread(
+    issue_number: int = typer.Argument(
+        ...,
+        help="Issue number to fetch with comments"
+    ),
+    config_path: Optional[Path] = typer.Option(
+        None,
+        "--config", "-c",
+        help="Path to config.yaml"
+    ),
+    output_dir: Optional[Path] = typer.Option(
+        None,
+        "--output-dir", "-o",
+        help="Output directory (defaults to same as config)"
+    ),
+):
+    """Fetch an issue with all its comments and save as markdown."""
+    try:
+        config = load_config(config_path)
+        thread_path = fetch_issue_thread(config, issue_number, output_dir)
+        
+        console.print(Panel(
+            f"Issue #{issue_number} thread saved to:\n[bold]{thread_path}[/bold]",
+            title="Thread Fetched"
+        ))
+    except FileNotFoundError as e:
+        console.print(f"[red]Error: {e}[/red]")
+        raise typer.Exit(1)
+    except ValueError as e:
+        console.print(f"[red]Error: {e}[/red]")
+        raise typer.Exit(1)
+    except Exception as e:
+        console.print(f"[red]Error: {e}[/red]")
+        raise typer.Exit(1)
+
+
+@app.command("fetch-user-issues")
+def fetch_user_issues_cmd(
+    username: str = typer.Argument(
+        ...,
+        help="GitHub username to search for"
+    ),
+    org: Optional[str] = typer.Option(
+        None,
+        "--org", "-O",
+        help="GitHub organization (defaults to owner from config)"
+    ),
+    config_path: Optional[Path] = typer.Option(
+        None,
+        "--config", "-c",
+        help="Path to config.yaml"
+    ),
+    output_dir: Optional[Path] = typer.Option(
+        None,
+        "--output-dir", "-o",
+        help="Output directory (creates username/ subfolder)"
+    ),
+    state: str = typer.Option(
+        "all",
+        "--state", "-s",
+        help="Issue state filter: open, closed, or all"
+    ),
+    since: Optional[str] = typer.Option(
+        None,
+        "--since",
+        help="Only include issues with user interaction after this date (YYYY-MM-DD)"
+    ),
+    until: Optional[str] = typer.Option(
+        None,
+        "--until",
+        help="Only include issues with user interaction before this date (YYYY-MM-DD)"
+    ),
+    delay: float = typer.Option(
+        0.0,
+        "--delay", "-d",
+        help="Seconds to wait between API calls (to avoid rate limits)"
+    ),
+    exclude_status: Optional[str] = typer.Option(
+        None,
+        "--exclude-status",
+        help="Comma-separated list of project status values to exclude (e.g., 'Todo,Backlog')"
+    ),
+    project_number: Optional[int] = typer.Option(
+        None,
+        "--project-number", "-p",
+        help="Project number to check status field (required with --exclude-status, or from config)"
+    ),
+    status_field: str = typer.Option(
+        "Status",
+        "--status-field",
+        help="Name of the status field in the project (default: Status)"
+    ),
+):
+    """Fetch all issues where a user has interacted and save as markdown files."""
+    try:
+        # Try to load config for defaults, but don't require it
+        default_org = None
+        default_project = None
+        try:
+            config = load_config(config_path)
+            default_org = config.owner
+            default_project = config.project_number
+        except FileNotFoundError:
+            pass
+        
+        # Use provided org/project or fall back to config
+        actual_org = org or default_org
+        actual_project = project_number or default_project
+        
+        # Parse date strings
+        since_dt = None
+        until_dt = None
+        
+        if since:
+            try:
+                since_dt = datetime.strptime(since, "%Y-%m-%d")
+            except ValueError:
+                console.print(f"[red]Error: Invalid date format for --since: {since}. Use YYYY-MM-DD[/red]")
+                raise typer.Exit(1)
+        
+        if until:
+            try:
+                until_dt = datetime.strptime(until, "%Y-%m-%d")
+            except ValueError:
+                console.print(f"[red]Error: Invalid date format for --until: {until}. Use YYYY-MM-DD[/red]")
+                raise typer.Exit(1)
+        
+        # Validate state
+        if state not in ("open", "closed", "all"):
+            console.print(f"[red]Error: Invalid state '{state}'. Use: open, closed, or all[/red]")
+            raise typer.Exit(1)
+        
+        # Parse exclude_status
+        exclude_list = None
+        if exclude_status:
+            exclude_list = [s.strip() for s in exclude_status.split(",") if s.strip()]
+            # Validate that project info is available
+            if not actual_project or not actual_org:
+                console.print("[red]Error: --exclude-status requires --project-number and --org (or config.yaml)[/red]")
+                raise typer.Exit(1)
+        
+        # Run the fetch
+        total_found, total_included, total_excluded, user_path = fetch_user_issues(
+            username=username,
+            org=actual_org,
+            output_dir=output_dir,
+            state=state,
+            since=since_dt,
+            until=until_dt,
+            delay=delay,
+            exclude_status=exclude_list,
+            project_number=actual_project,
+            status_field=status_field,
+        )
+        
+        # Summary panel
+        if total_found > 0:
+            summary_lines = [
+                f"User: [bold]@{username}[/bold]",
+                f"Organization: {actual_org or 'all'}",
+                f"Issues found: {total_found}",
+                f"Issues saved: {total_included}",
+            ]
+            if total_excluded > 0:
+                summary_lines.append(f"Issues excluded (date filter): {total_excluded}")
+            if user_path:
+                summary_lines.append(f"Output: [bold]{user_path}[/bold]")
+            
+            console.print(Panel(
+                "\n".join(summary_lines),
+                title="User Issues Fetched"
+            ))
+        else:
+            console.print(Panel(
+                f"No issues found for @{username}"
+                + (f" in organization {actual_org}" if actual_org else ""),
+                title="No Results"
+            ))
+            
+    except FileNotFoundError as e:
+        console.print(f"[red]Error: {e}[/red]")
+        raise typer.Exit(1)
+    except ValueError as e:
+        console.print(f"[red]Error: {e}[/red]")
+        raise typer.Exit(1)
     except Exception as e:
         console.print(f"[red]Error: {e}[/red]")
         raise typer.Exit(1)

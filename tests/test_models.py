@@ -4,7 +4,7 @@ from datetime import date
 
 import pytest
 
-from src.models import IssueState, Project, Task, TaskStatus
+from github_gaant.models import IssueState, Project, Task, TaskStatus
 
 
 class TestTask:

@@ -139,6 +139,309 @@ def save_issue_bodies(tasks: List[Task], issues_dir: Path) -> int:
     return count
 
 
+def format_issue_thread_markdown(issue_data: dict) -> str:
+    """
+    Format an issue with all its comments as a readable markdown document.
+    
+    Args:
+        issue_data: Dictionary from GitHubRESTClient.get_issue_with_comments()
+    
+    Returns:
+        Formatted markdown string
+    """
+    lines = []
+    
+    # Header
+    lines.append(f"# Issue #{issue_data['number']}: {issue_data['title']}")
+    lines.append("")
+    
+    # Metadata
+    author = issue_data['author']
+    created = issue_data['created_at'].strftime("%Y-%m-%d %H:%M")
+    state = issue_data['state'].upper()
+    labels = ", ".join(issue_data['labels']) if issue_data['labels'] else "none"
+    assignees = ", ".join(f"@{a}" for a in issue_data['assignees']) if issue_data['assignees'] else "unassigned"
+    
+    lines.append(f"**Opened by @{author}** on {created}")
+    lines.append(f"**Status:** {state} | **Labels:** {labels} | **Assignees:** {assignees}")
+    lines.append(f"**URL:** {issue_data['url']}")
+    lines.append("")
+    lines.append("---")
+    lines.append("")
+    
+    # Issue body
+    body = issue_data['body'].strip() if issue_data['body'] else "*No description provided.*"
+    lines.append(body)
+    lines.append("")
+    lines.append("---")
+    lines.append("")
+    
+    # Comments section
+    comments = issue_data['comments']
+    if comments:
+        lines.append(f"## Comments ({len(comments)})")
+        lines.append("")
+        
+        for comment in comments:
+            comment_author = comment['author']
+            comment_date = comment['created_at'].strftime("%Y-%m-%d %H:%M")
+            comment_body = comment['body'].strip() if comment['body'] else "*Empty comment*"
+            
+            lines.append(f"### @{comment_author} — {comment_date}")
+            lines.append("")
+            lines.append(comment_body)
+            lines.append("")
+            lines.append("---")
+            lines.append("")
+    else:
+        lines.append("## Comments")
+        lines.append("")
+        lines.append("*No comments yet.*")
+        lines.append("")
+    
+    return "\n".join(lines)
+
+
+def save_issue_thread(issue_data: dict, issues_dir: Path) -> Path:
+    """
+    Save an issue thread (issue + comments) to a markdown file.
+    
+    Args:
+        issue_data: Dictionary from GitHubRESTClient.get_issue_with_comments()
+        issues_dir: Directory to save the file
+    
+    Returns:
+        Path to the saved file
+    """
+    issues_dir.mkdir(parents=True, exist_ok=True)
+    
+    thread_path = issues_dir / f"{issue_data['number']}_thread.md"
+    content = format_issue_thread_markdown(issue_data)
+    
+    # Add header comment for identification
+    header = f"<!-- Issue #{issue_data['number']} Thread: {issue_data['title']} -->\n\n"
+    thread_path.write_text(header + content, encoding="utf-8")
+    
+    return thread_path
+
+
+def fetch_issue_thread(
+    config: Config,
+    issue_number: int,
+    output_dir: Optional[Path] = None,
+) -> Path:
+    """
+    Fetch an issue with all comments from GitHub and save as markdown.
+    
+    Args:
+        config: Configuration object
+        issue_number: Issue number to fetch
+        output_dir: Directory to save files (defaults to config directory)
+    
+    Returns:
+        Path to the saved thread file
+    """
+    from .github_rest import GitHubRESTClient
+    
+    token = get_github_token()
+    rest_client = GitHubRESTClient(token)
+    repo = rest_client.get_repo(config.owner, config.repo_name)
+    
+    console.print(f"[blue]Fetching issue #{issue_number} with comments...[/blue]")
+    issue_data = rest_client.get_issue_with_comments(repo, issue_number)
+    
+    if output_dir is None:
+        output_dir = Path(config.output_file).parent
+    
+    issues_dir = output_dir / "issues"
+    thread_path = save_issue_thread(issue_data, issues_dir)
+    
+    comment_count = len(issue_data['comments'])
+    console.print(f"[green]✓ Saved issue #{issue_number} with {comment_count} comments to {thread_path}[/green]")
+    
+    return thread_path
+
+
+def fetch_user_issues(
+    username: str,
+    org: Optional[str] = None,
+    output_dir: Optional[Path] = None,
+    state: str = "all",
+    since: Optional["datetime"] = None,
+    until: Optional["datetime"] = None,
+    delay: float = 0.0,
+    exclude_status: Optional[List[str]] = None,
+    project_number: Optional[int] = None,
+    status_field: str = "Status",
+) -> tuple:
+    """
+    Fetch all issues where a user has interacted in an organization.
+    
+    Args:
+        username: GitHub username to search for
+        org: Organization name (optional)
+        output_dir: Base directory for output (creates username/ subfolder)
+        state: Issue state filter (open/closed/all)
+        since: Only include issues with user interaction after this date
+        until: Only include issues with user interaction before this date
+        delay: Seconds to wait between API calls (to avoid rate limits)
+        exclude_status: List of status values to exclude (e.g., ["Todo", "Backlog"])
+        project_number: Project number to check status field (required if exclude_status is used)
+        status_field: Name of the status field in the project (default: "Status")
+    
+    Returns:
+        Tuple of (total_found, total_included, total_excluded, output_path)
+    """
+    import time
+    from datetime import datetime
+    from github import RateLimitExceededException
+    from .github_rest import GitHubRESTClient, user_interacted_in_range
+    from .github_graphql import GitHubGraphQLClient
+    
+    token = get_github_token()
+    rest_client = GitHubRESTClient(token)
+    
+    console.print(f"[blue]Searching issues for user @{username}...[/blue]")
+    if org:
+        console.print(f"[blue]Organization: {org}[/blue]")
+    if since or until:
+        date_range = []
+        if since:
+            date_range.append(f"desde {since.strftime('%Y-%m-%d')}")
+        if until:
+            date_range.append(f"hasta {until.strftime('%Y-%m-%d')}")
+        console.print(f"[blue]Filtro temporal: {' '.join(date_range)}[/blue]")
+    if exclude_status:
+        console.print(f"[blue]Excluyendo status de proyecto: {', '.join(exclude_status)}[/blue]")
+    
+    # If exclude_status is specified, load project status values
+    issue_status_map = {}
+    if exclude_status:
+        if not project_number or not org:
+            console.print("[red]Error: --exclude-status requires --project-number and --org[/red]")
+            raise ValueError("project_number and org required when using exclude_status")
+        
+        console.print(f"[blue]Loading project #{project_number} status values...[/blue]")
+        graphql_client = GitHubGraphQLClient(token)
+        
+        # Get project data
+        try:
+            project_data = graphql_client.get_project(org, project_number, is_org=True)
+        except Exception:
+            project_data = graphql_client.get_project(org, project_number, is_org=False)
+        
+        # Get all project items
+        from .models import Config, DateFieldConfig
+        temp_config = Config(
+            repo=f"{org}/temp",
+            project_number=project_number,
+            date_fields=DateFieldConfig(),
+        )
+        items = graphql_client.get_project_items_with_issues(project_data["id"], temp_config)
+        
+        # Build issue_number -> status mapping
+        for item in items:
+            content = item.get("content")
+            if not content or "number" not in content:
+                continue
+            
+            issue_number = content["number"]
+            
+            # Extract status field value
+            for field_value in item.get("fieldValues", {}).get("nodes", []):
+                if not field_value:
+                    continue
+                field = field_value.get("field", {})
+                field_name = field.get("name", "")
+                
+                if "name" in field_value and field_name == status_field:
+                    issue_status_map[issue_number] = field_value["name"]
+                    break
+        
+        console.print(f"[green]Loaded status for {len(issue_status_map)} issues in project[/green]")
+    
+    try:
+        issues = rest_client.search_issues_by_user(
+            username=username,
+            org=org,
+            state=state,
+            since=since,
+        )
+    except RateLimitExceededException as e:
+        reset_time = e.headers.get('X-RateLimit-Reset', 'unknown') if e.headers else 'unknown'
+        console.print(f"[red]Error: GitHub API rate limit exceeded.[/red]")
+        console.print(f"[yellow]Rate limit resets at: {reset_time}[/yellow]")
+        raise
+    
+    total_found = len(issues)
+    console.print(f"[green]Found {total_found} issues[/green]")
+    
+    if total_found == 0:
+        return (0, 0, 0, None)
+    
+    # Create output directory
+    if output_dir is None:
+        output_dir = Path(".")
+    
+    user_dir = output_dir / username
+    user_dir.mkdir(parents=True, exist_ok=True)
+    
+    total_included = 0
+    total_excluded = 0
+    
+    for idx, issue in enumerate(issues, 1):
+        try:
+            console.print(f"[blue]Processing issue {idx}/{total_found}: #{issue.number}...[/blue]", end=" ")
+            
+            # Get repository for this issue
+            repo = issue.repository
+            
+            # Fetch full issue data with comments
+            issue_data = rest_client.get_issue_with_comments(repo, issue.number)
+            
+            # Check if issue has excluded status in project
+            if exclude_status and issue.number in issue_status_map:
+                issue_status = issue_status_map[issue.number]
+                if issue_status in exclude_status:
+                    console.print(f"[yellow]excluded (project status: {issue_status})[/yellow]")
+                    total_excluded += 1
+                    continue
+            
+            # Check if user interacted within date range
+            if since or until:
+                if not user_interacted_in_range(issue_data, username, since, until):
+                    console.print("[yellow]excluded (no interaction in date range)[/yellow]")
+                    total_excluded += 1
+                    continue
+            
+            # Save the issue
+            save_issue_thread(issue_data, user_dir)
+            total_included += 1
+            comment_count = len(issue_data['comments'])
+            console.print(f"[green]saved ({comment_count} comments)[/green]")
+            
+            # Delay between requests if specified
+            if delay > 0 and idx < total_found:
+                time.sleep(delay)
+                
+        except RateLimitExceededException as e:
+            reset_time = e.headers.get('X-RateLimit-Reset', 'unknown') if e.headers else 'unknown'
+            console.print(f"\n[red]Error: GitHub API rate limit exceeded at issue {idx}/{total_found}.[/red]")
+            console.print(f"[yellow]Rate limit resets at: {reset_time}[/yellow]")
+            console.print(f"[yellow]Progress: {total_included} saved, {total_excluded} excluded[/yellow]")
+            raise
+        except Exception as e:
+            console.print(f"[red]error: {e}[/red]")
+            # Continue with next issue
+            continue
+    
+    console.print(f"\n[green]✓ Completed: {total_included} issues saved to {user_dir}[/green]")
+    if total_excluded > 0:
+        console.print(f"[yellow]  {total_excluded} issues excluded by date filter[/yellow]")
+    
+    return (total_found, total_included, total_excluded, user_dir)
+
+
 def load_issue_body(issue_number: int, issues_dir: Path) -> Optional[str]:
     """Load issue body from markdown file if it exists."""
     body_path = issues_dir / f"{issue_number}.md"
@@ -209,12 +512,14 @@ def detect_changes(
     # Build lookup maps
     def flatten_with_parents(tasks: List[Task]) -> Dict[int, Task]:
         result: Dict[int, Task] = {}
-        for task in tasks:
+        def add_recursive(task: Task):
             if task.issue_number > 0:
                 result[task.issue_number] = task
             for subtask in task.subtasks:
-                if subtask.issue_number > 0:
-                    result[subtask.issue_number] = subtask
+                add_recursive(subtask)
+        
+        for task in tasks:
+            add_recursive(task)
         return result
     
     local_tasks = flatten_with_parents(local_project.tasks)
