@@ -17,7 +17,18 @@ from .parsers.mermaid_gen import (
     generate_table_view,
     save_mermaid_to_file,
 )
-from .sync import ChangeType, get_status, pull_from_github, push_to_github, file_exists, load_project, fetch_issue_thread, fetch_user_issues
+from .sync import (
+    ChangeType,
+    collect_referenced_users,
+    fetch_issue_thread,
+    fetch_user_monthly_named_assigned_issues,
+    fetch_user_issues,
+    file_exists,
+    get_status,
+    load_project,
+    pull_from_github,
+    push_to_github,
+)
 
 app = typer.Typer(
     name="gaant",
@@ -54,13 +65,13 @@ def init(
     output: str = typer.Option(
         "gaant.yaml",
         "--output", "-o",
-        help="Output file name (.yaml or .xlsx)"
+        help="Output file name (.yaml)"
     ),
 ):
     """Initialize a new GitHub Gaant configuration."""
     # Validate extension
-    if not output.endswith(('.yaml', '.yml', '.xlsx')):
-        console.print("[yellow]Warning: Using .yaml extension. Supported: .yaml, .xlsx[/yellow]")
+    if not output.endswith((".yaml", ".yml")):
+        console.print("[yellow]Warning: Using .yaml extension. Supported: .yaml[/yellow]")
         output = output + ".yaml"
     
     config = Config(
@@ -95,10 +106,10 @@ def pull(
     output: Optional[Path] = typer.Option(
         None,
         "--output", "-o",
-        help="Output file path (.yaml or .xlsx, overrides config)"
+        help="Output file path (.yaml, overrides config)"
     ),
 ):
-    """Pull issues from GitHub and save to local file (YAML or Excel)."""
+    """Pull issues from GitHub and save to local YAML file."""
     try:
         config = load_config(config_path)
         project = pull_from_github(config, output)
@@ -130,7 +141,7 @@ def push(
     source: Optional[Path] = typer.Option(
         None,
         "--source", "-s",
-        help="Source file path (.yaml or .xlsx, overrides config)"
+        help="Source file path (.yaml, overrides config)"
     ),
     dry_run: bool = typer.Option(
         False,
@@ -215,7 +226,7 @@ def view(
     source: Optional[Path] = typer.Option(
         None,
         "--source", "-s",
-        help="Source file path (.yaml or .xlsx)"
+        help="Source file path (.yaml)"
     ),
     format: str = typer.Option(
         "mermaid",
@@ -350,6 +361,246 @@ def fetch_thread(
             f"Issue #{issue_number} thread saved to:\n[bold]{thread_path}[/bold]",
             title="Thread Fetched"
         ))
+    except FileNotFoundError as e:
+        console.print(f"[red]Error: {e}[/red]")
+        raise typer.Exit(1)
+    except ValueError as e:
+        console.print(f"[red]Error: {e}[/red]")
+        raise typer.Exit(1)
+    except Exception as e:
+        console.print(f"[red]Error: {e}[/red]")
+        raise typer.Exit(1)
+
+
+@app.command("fetch-user-monthly")
+def fetch_user_monthly_cmd(
+    username: str = typer.Option(
+        ...,
+        "--username", "-u",
+        help="GitHub username to search for",
+    ),
+    year: int = typer.Option(
+        ...,
+        "--year", "-y",
+        help="Year (e.g., 2026)",
+    ),
+    month: int = typer.Option(
+        ...,
+        "--month", "-m",
+        help="Month number 1-12",
+    ),
+    org: Optional[str] = typer.Option(
+        None,
+        "--org", "-O",
+        help="GitHub organization (optional)",
+    ),
+    repo: Optional[str] = typer.Option(
+        None,
+        "--repo", "-r",
+        help="GitHub repository in format owner/repo (optional)",
+    ),
+    config_path: Optional[Path] = typer.Option(
+        None,
+        "--config", "-c",
+        help="Path to config.yaml (for default repo/org)",
+    ),
+    output_dir: Optional[Path] = typer.Option(
+        None,
+        "--output-dir", "-o",
+        help="Base output directory",
+    ),
+    state: str = typer.Option(
+        "all",
+        "--state", "-s",
+        help="Issue state filter: open, closed, or all",
+    ),
+    delay: float = typer.Option(
+        0.0,
+        "--delay", "-d",
+        help="Seconds to wait between API calls (to avoid rate limits)",
+    ),
+):
+    """Fetch monthly issues where a user was mentioned or assigned."""
+    try:
+        if month < 1 or month > 12:
+            console.print(f"[red]Error: Invalid month '{month}'. Use 1 to 12[/red]")
+            raise typer.Exit(1)
+        if state not in ("open", "closed", "all"):
+            console.print(f"[red]Error: Invalid state '{state}'. Use: open, closed, or all[/red]")
+            raise typer.Exit(1)
+
+        default_org = None
+        default_repo = None
+        try:
+            config = load_config(config_path)
+            default_org = config.owner
+            default_repo = config.repo
+        except FileNotFoundError:
+            pass
+
+        # Priority:
+        # 1) Explicit --repo (most specific)
+        # 2) Explicit --org (ignore repo from config)
+        # 3) Fallback to config defaults
+        if repo:
+            actual_repo = repo
+            actual_org = org or default_org
+        elif org:
+            actual_repo = None
+            actual_org = org
+        else:
+            actual_repo = default_repo
+            actual_org = default_org
+        if not actual_repo and not actual_org:
+            console.print(
+                "[red]Error: Provide --repo or --org (or configure repo/org in config.yaml)[/red]"
+            )
+            raise typer.Exit(1)
+
+        total_found, total_included, total_excluded, month_path = (
+            fetch_user_monthly_named_assigned_issues(
+                username=username,
+                year=year,
+                month=month,
+                org=actual_org,
+                repo=actual_repo,
+                output_dir=output_dir,
+                state=state,
+                delay=delay,
+            )
+        )
+
+        if total_found > 0:
+            summary_lines = [
+                f"User: [bold]@{username}[/bold]",
+                f"Period: {year:04d}-{month:02d}",
+                f"Scope: {actual_repo or actual_org}",
+                f"Issues found: {total_found}",
+                f"Issues saved: {total_included}",
+            ]
+            if total_excluded > 0:
+                summary_lines.append(f"Issues excluded: {total_excluded}")
+            if month_path:
+                summary_lines.append(f"Output: [bold]{month_path}[/bold]")
+
+            console.print(Panel("\n".join(summary_lines), title="Monthly User Issues Fetched"))
+        else:
+            console.print(
+                Panel(
+                    f"No issues found for @{username} in {year:04d}-{month:02d}"
+                    + (f" for {actual_repo}" if actual_repo else f" in organization {actual_org}"),
+                    title="No Results",
+                )
+            )
+    except FileNotFoundError as e:
+        console.print(f"[red]Error: {e}[/red]")
+        raise typer.Exit(1)
+    except ValueError as e:
+        console.print(f"[red]Error: {e}[/red]")
+        raise typer.Exit(1)
+    except Exception as e:
+        console.print(f"[red]Error: {e}[/red]")
+        raise typer.Exit(1)
+
+
+@app.command("list-referenced-users")
+def list_referenced_users_cmd(
+    org: Optional[str] = typer.Option(
+        None,
+        "--org", "-O",
+        help="GitHub organization (optional)",
+    ),
+    repo: Optional[str] = typer.Option(
+        None,
+        "--repo", "-r",
+        help="GitHub repository in format owner/repo (optional)",
+    ),
+    config_path: Optional[Path] = typer.Option(
+        None,
+        "--config", "-c",
+        help="Path to config.yaml (for default repo/org)",
+    ),
+    state: str = typer.Option(
+        "all",
+        "--state", "-s",
+        help="Issue state filter: open, closed, or all",
+    ),
+    delay: float = typer.Option(
+        0.0,
+        "--delay", "-d",
+        help="Seconds to wait between API calls (to avoid rate limits)",
+    ),
+):
+    """List GitHub users mentioned or assigned in a repository or organization."""
+    try:
+        if state not in ("open", "closed", "all"):
+            console.print(f"[red]Error: Invalid state '{state}'. Use: open, closed, or all[/red]")
+            raise typer.Exit(1)
+
+        default_org = None
+        default_repo = None
+        try:
+            config = load_config(config_path)
+            default_org = config.owner
+            default_repo = config.repo
+        except FileNotFoundError:
+            pass
+
+        if repo:
+            actual_repo = repo
+            actual_org = org or default_org
+        elif org:
+            actual_repo = None
+            actual_org = org
+        else:
+            actual_repo = default_repo
+            actual_org = default_org
+
+        if not actual_repo and not actual_org:
+            console.print(
+                "[red]Error: Provide --repo or --org (or configure repo/org in config.yaml)[/red]"
+            )
+            raise typer.Exit(1)
+
+        total_issues, summaries = collect_referenced_users(
+            org=actual_org,
+            repo=actual_repo,
+            state=state,
+            delay=delay,
+        )
+
+        if not summaries:
+            console.print(
+                Panel(
+                    f"No referenced users found in {actual_repo or actual_org}",
+                    title="No Results",
+                )
+            )
+            return
+
+        table = Table(title=f"Referenced Users ({actual_repo or actual_org})")
+        table.add_column("User", style="bold")
+        table.add_column("Issues", justify="right")
+        table.add_column("Mentioned In", justify="right")
+        table.add_column("Assigned In", justify="right")
+
+        for summary in summaries:
+            table.add_row(
+                f"@{summary.username}",
+                str(summary.issues),
+                str(summary.mentioned_in),
+                str(summary.assigned_in),
+            )
+
+        console.print(table)
+        console.print(
+            Panel(
+                f"Scope: {actual_repo or actual_org}\n"
+                f"Issues scanned: {total_issues}\n"
+                f"Users found: {len(summaries)}",
+                title="Summary",
+            )
+        )
     except FileNotFoundError as e:
         console.print(f"[red]Error: {e}[/red]")
         raise typer.Exit(1)

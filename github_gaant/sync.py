@@ -1,4 +1,4 @@
-"""Synchronization logic between GitHub and local files (YAML/Excel)."""
+"""Synchronization logic between GitHub and local YAML files."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from typing import Dict, List, Optional
 
 from rich.console import Console
 
-from .config import get_github_token, load_config
+from .config import get_github_token
 from .github_graphql import GitHubGraphQLClient, fetch_project_data
 from .github_rest import GitHubRESTClient, create_issue_from_task, update_issue_from_task
 from .models import Config, IssueState, Project, Task
@@ -18,11 +18,6 @@ from .parsers.yaml_parser import (
     load_project_from_yaml,
     save_project_to_yaml,
     yaml_exists,
-)
-from .parsers.excel_parser import (
-    load_project_from_excel,
-    save_project_to_excel,
-    excel_exists,
 )
 from .parsers.mermaid_gen import (
     generate_mermaid_gantt,
@@ -32,30 +27,18 @@ from .parsers.mermaid_gen import (
 console = Console()
 
 
-def is_excel_file(path: Path) -> bool:
-    """Check if path is an Excel file."""
-    return path.suffix.lower() in (".xlsx", ".xls")
-
-
 def file_exists(path: Path) -> bool:
-    """Check if the file exists (YAML or Excel)."""
-    if is_excel_file(path):
-        return excel_exists(path)
+    """Check if the YAML file exists."""
     return yaml_exists(path)
 
 
 def save_project(project: Project, path: Path) -> None:
-    """Save project to file (auto-detect format from extension)."""
-    if is_excel_file(path):
-        save_project_to_excel(project, path)
-    else:
-        save_project_to_yaml(project, path)
+    """Save project to YAML file."""
+    save_project_to_yaml(project, path)
 
 
 def load_project(path: Path) -> Project:
-    """Load project from file (auto-detect format from extension)."""
-    if is_excel_file(path):
-        return load_project_from_excel(path)
+    """Load project from YAML file."""
     return load_project_from_yaml(path)
 
 
@@ -77,10 +60,19 @@ class TaskChange:
     changes: List[str]  # Description of what changed
 
 
+@dataclass
+class ReferencedUserSummary:
+    """Aggregated mention/assignment counters for one GitHub user."""
+    username: str
+    mentioned_in: int = 0
+    assigned_in: int = 0
+    issues: int = 0
+
+
 def pull_from_github(config: Config, output_path: Optional[Path] = None) -> Project:
     """
     Pull project data from GitHub and save to local files.
-    Always exports to YAML, Excel and Mermaid Gantt (.md).
+    Always exports to YAML and Mermaid Gantt (.md).
     GitHub is source of truth on pull.
     """
     token = get_github_token()
@@ -102,11 +94,6 @@ def pull_from_github(config: Config, output_path: Optional[Path] = None) -> Proj
     yaml_path = output_dir / f"{base_name}.yaml"
     save_project_to_yaml(project, yaml_path)
     console.print(f"[green]✓ Saved YAML to {yaml_path}[/green]")
-    
-    # Always save to Excel
-    excel_path = output_dir / f"{base_name}.xlsx"
-    save_project_to_excel(project, excel_path)
-    console.print(f"[green]✓ Saved Excel to {excel_path}[/green]")
     
     # Always save Mermaid Gantt to .md
     mermaid_path = output_dir / f"{base_name}_gantt.md"
@@ -164,6 +151,9 @@ def format_issue_thread_markdown(issue_data: dict) -> str:
     
     lines.append(f"**Opened by @{author}** on {created}")
     lines.append(f"**Status:** {state} | **Labels:** {labels} | **Assignees:** {assignees}")
+    repository = issue_data.get("repository")
+    if repository:
+        lines.append(f"**Repository:** {repository}")
     lines.append(f"**URL:** {issue_data['url']}")
     lines.append("")
     lines.append("---")
@@ -198,11 +188,34 @@ def format_issue_thread_markdown(issue_data: dict) -> str:
         lines.append("")
         lines.append("*No comments yet.*")
         lines.append("")
+
+    # Timeline/events section (if available)
+    events = issue_data.get("events", [])
+    if events:
+        lines.append("## Interactions / Events")
+        lines.append("")
+        for event in events:
+            event_name = event.get("event", "unknown")
+            actor = event.get("actor", "unknown")
+            event_date = event.get("created_at")
+            event_date_text = event_date.strftime("%Y-%m-%d %H:%M") if event_date else "unknown-date"
+            details = []
+            if event.get("assignee"):
+                details.append(f"assignee=@{event['assignee']}")
+            if event.get("label"):
+                details.append(f"label={event['label']}")
+            if event.get("milestone"):
+                details.append(f"milestone={event['milestone']}")
+            if event.get("commit_id"):
+                details.append(f"commit={event['commit_id']}")
+            detail_text = f" ({', '.join(details)})" if details else ""
+            lines.append(f"- `{event_date_text}` `{event_name}` by @{actor}{detail_text}")
+        lines.append("")
     
     return "\n".join(lines)
 
 
-def save_issue_thread(issue_data: dict, issues_dir: Path) -> Path:
+def save_issue_thread(issue_data: dict, issues_dir: Path, include_repo_in_name: bool = False) -> Path:
     """
     Save an issue thread (issue + comments) to a markdown file.
     
@@ -215,7 +228,13 @@ def save_issue_thread(issue_data: dict, issues_dir: Path) -> Path:
     """
     issues_dir.mkdir(parents=True, exist_ok=True)
     
-    thread_path = issues_dir / f"{issue_data['number']}_thread.md"
+    if include_repo_in_name and issue_data.get("repository"):
+        safe_repo = issue_data["repository"].replace("/", "-")
+        file_name = f"{safe_repo}-{issue_data['number']}_thread.md"
+    else:
+        file_name = f"{issue_data['number']}_thread.md"
+
+    thread_path = issues_dir / file_name
     content = format_issue_thread_markdown(issue_data)
     
     # Add header comment for identification
@@ -442,6 +461,176 @@ def fetch_user_issues(
     return (total_found, total_included, total_excluded, user_dir)
 
 
+def fetch_user_monthly_named_assigned_issues(
+    username: str,
+    year: int,
+    month: int,
+    org: Optional[str] = None,
+    repo: Optional[str] = None,
+    output_dir: Optional[Path] = None,
+    state: str = "all",
+    delay: float = 0.0,
+) -> tuple:
+    """
+    Fetch issues where user was mentioned or assigned during a given month.
+
+    Returns:
+        Tuple of (total_found, total_included, total_excluded, output_path)
+    """
+    import time
+    from calendar import monthrange
+    from datetime import datetime, timezone
+    from github import RateLimitExceededException
+    from .github_rest import GitHubRESTClient, user_named_or_assigned_in_range
+
+    if month < 1 or month > 12:
+        raise ValueError("month must be between 1 and 12")
+    if not org and not repo:
+        raise ValueError("repo or org is required")
+
+    last_day = monthrange(year, month)[1]
+    since = datetime(year, month, 1, 0, 0, 0, tzinfo=timezone.utc)
+    until = datetime(year, month, last_day, 23, 59, 59, tzinfo=timezone.utc)
+
+    token = get_github_token()
+    rest_client = GitHubRESTClient(token)
+
+    console.print(
+        f"[blue]Searching issues for @{username} (mentioned/assigned) in {year:04d}-{month:02d}...[/blue]"
+    )
+    if repo:
+        console.print(f"[blue]Repository: {repo}[/blue]")
+    if org:
+        console.print(f"[blue]Organization: {org}[/blue]")
+
+    try:
+        issues = rest_client.search_issues_by_mentions_or_assignment(
+            username=username,
+            org=org,
+            repo=repo,
+            state=state,
+            since=since,
+            until=until,
+        )
+    except RateLimitExceededException as e:
+        reset_time = e.headers.get("X-RateLimit-Reset", "unknown") if e.headers else "unknown"
+        console.print("[red]Error: GitHub API rate limit exceeded.[/red]")
+        console.print(f"[yellow]Rate limit resets at: {reset_time}[/yellow]")
+        raise
+
+    total_found = len(issues)
+    console.print(f"[green]Found {total_found} candidate issues[/green]")
+    if total_found == 0:
+        return (0, 0, 0, None)
+
+    if output_dir is None:
+        output_dir = Path(".")
+    scope = repo or org or "scope"
+    scope_slug = scope.replace("/", "-").replace(" ", "-")
+    month_dir = output_dir / f"{username}-{year}-{month}-{scope_slug}"
+    month_dir.mkdir(parents=True, exist_ok=True)
+
+    total_included = 0
+    total_excluded = 0
+
+    for idx, issue in enumerate(issues, 1):
+        try:
+            console.print(f"[blue]Processing issue {idx}/{total_found}: #{issue.number}...[/blue]", end=" ")
+            repo = issue.repository
+            issue_data = rest_client.get_issue_with_activity(repo, issue.number)
+            if not user_named_or_assigned_in_range(issue_data, username, since, until):
+                total_excluded += 1
+                console.print("[yellow]excluded (no mention/assignment in month)[/yellow]")
+                continue
+
+            save_issue_thread(issue_data, month_dir, include_repo_in_name=True)
+            total_included += 1
+            comment_count = len(issue_data.get("comments", []))
+            event_count = len(issue_data.get("events", []))
+            console.print(f"[green]saved ({comment_count} comments, {event_count} events)[/green]")
+
+            if delay > 0 and idx < total_found:
+                time.sleep(delay)
+        except RateLimitExceededException as e:
+            reset_time = e.headers.get("X-RateLimit-Reset", "unknown") if e.headers else "unknown"
+            console.print(
+                f"\n[red]Error: GitHub API rate limit exceeded at issue {idx}/{total_found}.[/red]"
+            )
+            console.print(f"[yellow]Rate limit resets at: {reset_time}[/yellow]")
+            console.print(
+                f"[yellow]Progress: {total_included} saved, {total_excluded} excluded[/yellow]"
+            )
+            raise
+        except Exception as e:
+            console.print(f"[red]error: {e}[/red]")
+            continue
+
+    console.print(
+        f"\n[green]✓ Completed: {total_included} issues saved to {month_dir}[/green]"
+    )
+    if total_excluded > 0:
+        console.print(
+            f"[yellow]  {total_excluded} issues excluded (no mention/assignment in month)[/yellow]"
+        )
+
+    return (total_found, total_included, total_excluded, month_dir)
+
+
+def collect_referenced_users(
+    org: Optional[str] = None,
+    repo: Optional[str] = None,
+    state: str = "all",
+    delay: float = 0.0,
+) -> tuple[int, List[ReferencedUserSummary]]:
+    """
+    Collect users mentioned or assigned in issues for a repository or organization.
+    """
+    import time
+    from .github_rest import GitHubRESTClient, extract_referenced_users
+
+    if not org and not repo:
+        raise ValueError("repo or org is required")
+
+    token = get_github_token()
+    rest_client = GitHubRESTClient(token)
+
+    if repo:
+        console.print(f"[blue]Scanning issues in repository: {repo}[/blue]")
+    if org and not repo:
+        console.print(f"[blue]Scanning issues in organization: {org}[/blue]")
+
+    issues = rest_client.search_issues_in_scope(org=org, repo=repo, state=state)
+    total_issues = len(issues)
+    console.print(f"[green]Found {total_issues} issues to inspect[/green]")
+    if total_issues == 0:
+        return (0, [])
+
+    user_map: Dict[str, ReferencedUserSummary] = {}
+
+    for idx, issue in enumerate(issues, 1):
+        console.print(f"[blue]Inspecting issue {idx}/{total_issues}: #{issue.number}...[/blue]")
+        issue_data = rest_client.get_issue_with_activity(issue.repository, issue.number)
+        referenced = extract_referenced_users(issue_data)
+        issue_users = set(referenced["mentioned"]) | set(referenced["assigned"])
+
+        for username in issue_users:
+            summary = user_map.setdefault(username, ReferencedUserSummary(username=username))
+            if username in referenced["mentioned"]:
+                summary.mentioned_in += 1
+            if username in referenced["assigned"]:
+                summary.assigned_in += 1
+            summary.issues += 1
+
+        if delay > 0 and idx < total_issues:
+            time.sleep(delay)
+
+    summaries = sorted(
+        user_map.values(),
+        key=lambda item: (-item.issues, -item.mentioned_in, -item.assigned_in, item.username),
+    )
+    return (total_issues, summaries)
+
+
 def load_issue_body(issue_number: int, issues_dir: Path) -> Optional[str]:
     """Load issue body from markdown file if it exists."""
     body_path = issues_dir / f"{issue_number}.md"
@@ -452,7 +641,8 @@ def load_issue_body(issue_number: int, issues_dir: Path) -> Optional[str]:
         if lines and lines[0].startswith("<!-- Issue #"):
             # Skip header comment and empty line after it
             content = "\n".join(lines[2:]) if len(lines) > 2 else ""
-        return content.strip() if content.strip() else None
+        # Return empty string when body file exists but was intentionally cleared.
+        return content.strip()
     return None
 
 
@@ -492,11 +682,12 @@ def compare_tasks(local: Task, remote: Task) -> List[str]:
     if local.state != remote.state:
         changes.append(f"state: {remote.state.value} → {local.state.value}")
     
-    # Compare body content
-    local_body = (local.body or "").strip()
-    remote_body = (remote.body or "").strip()
-    if local_body != remote_body:
-        changes.append("body: content changed")
+    # Compare body only when local content is explicitly provided.
+    if local.body is not None:
+        local_body = local.body.strip()
+        remote_body = (remote.body or "").strip()
+        if local_body != remote_body:
+            changes.append("body: content changed")
     
     return changes
 
@@ -810,4 +1001,3 @@ def get_status(config: Config, local_path: Optional[Path] = None) -> List[TaskCh
     changes = detect_changes(local_project, remote_project)
     
     return changes
-

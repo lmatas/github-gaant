@@ -5,9 +5,16 @@ from pathlib import Path
 from typing import Optional
 
 import yaml
-from dotenv import load_dotenv
+from dotenv import find_dotenv, load_dotenv
 
 from .models import Config
+
+
+def _load_env_file() -> None:
+    """Load .env file from current working directory or parent directories."""
+    dotenv_path = find_dotenv(usecwd=True)
+    if dotenv_path:
+        load_dotenv(dotenv_path=dotenv_path, override=False)
 
 
 def find_config_file(start_path: Optional[Path] = None) -> Optional[Path]:
@@ -28,7 +35,7 @@ def find_config_file(start_path: Optional[Path] = None) -> Optional[Path]:
 def load_config(config_path: Optional[Path] = None) -> Config:
     """Load configuration from YAML file and environment."""
     # Load .env file
-    load_dotenv()
+    _load_env_file()
     
     # Find config file
     if config_path is None:
@@ -48,6 +55,7 @@ def load_config(config_path: Optional[Path] = None) -> Config:
 
 def get_github_token() -> str:
     """Get GitHub token from environment."""
+    _load_env_file()
     token = os.getenv("GITHUB_TOKEN")
     if not token:
         raise ValueError(

@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+import re
+from datetime import datetime, timezone
 from typing import List, Optional
 
 from github import Auth, Github, RateLimitExceededException
@@ -11,6 +12,8 @@ from github.Issue import Issue
 from github.Repository import Repository
 
 from .models import Config, Task
+
+MENTION_RE = re.compile(r"(?<![A-Za-z0-9-])@([A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?)")
 
 
 class GitHubRESTClient:
@@ -141,6 +144,7 @@ class GitHubRESTClient:
         
         return {
             "number": issue.number,
+            "repository": repo.full_name,
             "title": issue.title,
             "body": issue.body or "",
             "state": issue.state,
@@ -160,6 +164,32 @@ class GitHubRESTClient:
                 for c in comments
             ],
         }
+
+    def get_issue_with_activity(
+        self,
+        repo: Repository,
+        issue_number: int,
+    ) -> dict:
+        """
+        Get an issue with comments and timeline events (interactions).
+        """
+        issue_data = self.get_issue_with_comments(repo, issue_number)
+        issue = repo.get_issue(issue_number)
+        events = list(issue.get_events())
+
+        issue_data["events"] = [
+            {
+                "event": e.event or "unknown",
+                "actor": e.actor.login if e.actor else "unknown",
+                "created_at": e.created_at,
+                "assignee": e.assignee.login if getattr(e, "assignee", None) else None,
+                "label": e.label.name if getattr(e, "label", None) else None,
+                "milestone": e.milestone.title if getattr(e, "milestone", None) else None,
+                "commit_id": getattr(e, "commit_id", None),
+            }
+            for e in events
+        ]
+        return issue_data
 
     def search_issues_by_user(
         self,
@@ -211,6 +241,115 @@ class GitHubRESTClient:
                 headers=e.headers
             )
 
+    def search_issues_by_mentions_or_assignment(
+        self,
+        username: str,
+        org: Optional[str] = None,
+        repo: Optional[str] = None,
+        state: str = "all",
+        since: Optional[datetime] = None,
+        until: Optional[datetime] = None,
+    ) -> List[Issue]:
+        """
+        Search issues where the user was mentioned or assigned.
+        """
+        base_parts = ["is:issue"]
+        if repo:
+            base_parts.append(f"repo:{repo}")
+        elif org:
+            base_parts.append(f"org:{org}")
+        if state != "all":
+            base_parts.append(f"is:{state}")
+        if since:
+            base_parts.append(f"updated:>={since.strftime('%Y-%m-%d')}")
+        if until:
+            base_parts.append(f"updated:<={until.strftime('%Y-%m-%d')}")
+
+        query_mentions = " ".join(base_parts + [f"mentions:{username}"])
+        query_assigned = " ".join(base_parts + [f"assignee:{username}"])
+
+        try:
+            mentioned = list(self.github.search_issues(query_mentions, sort="updated", order="desc"))
+            assigned = list(self.github.search_issues(query_assigned, sort="updated", order="desc"))
+        except RateLimitExceededException as e:
+            raise RateLimitExceededException(
+                status=e.status,
+                data=e.data,
+                headers=e.headers
+            )
+
+        seen = set()
+        merged: List[Issue] = []
+        for issue in mentioned + assigned:
+            key = (issue.repository.full_name, issue.number)
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(issue)
+
+        return merged
+
+    def search_issues_in_scope(
+        self,
+        org: Optional[str] = None,
+        repo: Optional[str] = None,
+        state: str = "all",
+    ) -> List[Issue]:
+        """List issues for a repository or organization scope."""
+        if repo:
+            owner, repo_name = repo.split("/", 1)
+            repository = self.get_repo(owner, repo_name)
+            return self.get_all_issues(repository, state=state)
+
+        query_parts = ["is:issue"]
+        if org:
+            query_parts.append(f"org:{org}")
+        if state != "all":
+            query_parts.append(f"is:{state}")
+
+        query = " ".join(query_parts)
+        try:
+            return list(self.github.search_issues(query, sort="updated", order="desc"))
+        except RateLimitExceededException as e:
+            raise RateLimitExceededException(
+                status=e.status,
+                data=e.data,
+                headers=e.headers,
+            )
+
+
+def _to_utc_aware(dt: datetime) -> datetime:
+    """Normalize datetime to UTC-aware for safe comparisons."""
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def extract_mentioned_users(text: str) -> set[str]:
+    """Extract GitHub usernames referenced with @mention syntax."""
+    if not text:
+        return set()
+    return {match.lower() for match in MENTION_RE.findall(text)}
+
+
+def extract_referenced_users(issue_data: dict) -> dict[str, set[str]]:
+    """Collect mentioned and assigned users from an issue payload."""
+    mentioned_users = extract_mentioned_users(issue_data.get("body") or "")
+    assigned_users = {assignee.lower() for assignee in issue_data.get("assignees", [])}
+
+    for comment in issue_data.get("comments", []):
+        mentioned_users.update(extract_mentioned_users(comment.get("body") or ""))
+
+    for event in issue_data.get("events", []):
+        assignee = event.get("assignee")
+        if assignee:
+            assigned_users.add(assignee.lower())
+
+    return {
+        "mentioned": mentioned_users,
+        "assigned": assigned_users,
+    }
+
 
 def user_interacted_in_range(
     issue_data: dict,
@@ -237,16 +376,20 @@ def user_interacted_in_range(
     # If no date filters, always return True
     if since is None and until is None:
         return True
+
+    since_utc = _to_utc_aware(since) if since else None
+    until_end_utc = None
+    if until:
+        until_end = datetime(until.year, until.month, until.day, 23, 59, 59, tzinfo=until.tzinfo)
+        until_end_utc = _to_utc_aware(until_end)
     
     def in_range(dt: datetime) -> bool:
         """Check if a datetime falls within the range."""
-        if since and dt < since:
+        current = _to_utc_aware(dt)
+        if since_utc and current < since_utc:
             return False
-        if until:
-            # Include the entire "until" day (up to 23:59:59)
-            until_end = datetime(until.year, until.month, until.day, 23, 59, 59)
-            if dt > until_end:
-                return False
+        if until_end_utc and current > until_end_utc:
+            return False
         return True
     
     # Check if user created the issue within the range
@@ -260,6 +403,55 @@ def user_interacted_in_range(
             if in_range(comment['created_at']):
                 return True
     
+    return False
+
+
+def user_named_or_assigned_in_range(
+    issue_data: dict,
+    username: str,
+    since: Optional[datetime] = None,
+    until: Optional[datetime] = None,
+) -> bool:
+    """
+    Check if user was mentioned or assigned within date range.
+    """
+    target = username.lower().lstrip("@")
+
+    since_utc = _to_utc_aware(since) if since else None
+    until_end_utc = None
+    if until:
+        until_end = datetime(until.year, until.month, until.day, 23, 59, 59, tzinfo=until.tzinfo)
+        until_end_utc = _to_utc_aware(until_end)
+
+    def in_range(dt: datetime) -> bool:
+        current = _to_utc_aware(dt)
+        if since_utc and current < since_utc:
+            return False
+        if until_end_utc and current > until_end_utc:
+            return False
+        return True
+
+    # Issue body mention on creation date.
+    body = (issue_data.get("body") or "").lower()
+    if f"@{target}" in body and issue_data.get("created_at") and in_range(issue_data["created_at"]):
+        return True
+
+    # Comment mentions.
+    for comment in issue_data.get("comments", []):
+        comment_body = (comment.get("body") or "").lower()
+        created_at = comment.get("created_at")
+        if f"@{target}" in comment_body and created_at and in_range(created_at):
+            return True
+
+    # Assignment events.
+    for event in issue_data.get("events", []):
+        if event.get("event") not in ("assigned", "unassigned"):
+            continue
+        assignee = (event.get("assignee") or "").lower()
+        created_at = event.get("created_at")
+        if assignee == target and created_at and in_range(created_at):
+            return True
+
     return False
 
 
